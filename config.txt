@@ -1,0 +1,4 @@
+input_file=/home/ssn/devcpp/segystack/data/test_cdp_gathers.sgy
+output_file=/home/ssn/devcpp/segystack/data/test_stack.sgy
+velocity_file=/home/ssn/devcpp/segystack/data/test_vel.sgy
+nmo_stretch_muting_percent=30.0 
