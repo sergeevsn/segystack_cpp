@@ -197,3 +197,9 @@ int16_t SegyReader::get_bin_header_value_i16(const std::string& key) const {
     }
     return get_i16_be(bin_header_.data(), it->second.offset);
 }
+
+void SegyReader::read_raw_block(int start_trace_idx, size_t bytes_to_read, char* buffer) const {
+    std::streamoff offset = trace_offset(start_trace_idx);
+    file_.seekg(offset, std::ios::beg);
+    file_.read(buffer, bytes_to_read);
+}

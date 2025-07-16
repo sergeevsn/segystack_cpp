@@ -45,6 +45,14 @@ public:
      */
     void load_tracemap(const std::string& map_name, const std::string& db_path, const std::vector<std::string>& keys);
 
+        /**
+     * @brief Читает сырой блок данных из файла.
+     * @param start_trace_idx Индекс первой трассы для чтения.
+     * @param bytes_to_read Количество байт для чтения.
+     * @param buffer Указатель на буфер, куда будут помещены данные.
+     */
+    void read_raw_block(int start_trace_idx, size_t bytes_to_read, char* buffer) const;
+
     // --- ОСНОВНЫЕ МЕТОДЫ ДОСТУПА К ДАННЫМ ---
 
     std::vector<float> get_trace(int index) const;

@@ -75,70 +75,71 @@ void TraceMap::create_table() {
 }
 
 void TraceMap::build_map(const SegyReader& reader) {
+    std::cout << "Starting high-performance map build..." << std::endl;
     int n_traces = reader.num_traces();
     size_t n_keys = keys_.size();
-
-    // --- Шаг 1: Последовательное чтение ключей с диска в память ---
-    struct TraceKeyInfo {
-        int trace_idx;
-        std::vector<int> key_values;
-    };
     
-    std::vector<TraceKeyInfo> all_keys_info;
-    all_keys_info.reserve(n_traces);
+    // Определяем размер одного полного блока трассы (заголовок + данные)
+    const int trace_size = 240 + reader.num_samples() * 4;
+    
+    // Устанавливаем большой размер буфера для чтения (например, 256 МБ)
+    const size_t CHUNK_SIZE_BYTES = 256 * 1024 * 1024;
+    // Сколько полных трасс помещается в наш буфер
+    const int traces_per_chunk = CHUNK_SIZE_BYTES / trace_size;
+    
+    // Временный буфер для чтения больших кусков файла
+    std::vector<char> buffer(traces_per_chunk * trace_size);
 
-    std::cout << "Building trace map..." << std::endl;
-    for (int i = 0; i < n_traces; ++i) {
-        auto header = reader.get_trace_header(i);
-        std::vector<int> key_vals(n_keys);
-        for (size_t j = 0; j < n_keys; ++j) {
-            key_vals[j] = get_trace_field_value(header.data(), keys_[j]);
-        }
-        all_keys_info.push_back({i, std::move(key_vals)});
-        
-        // Обновляем прогресс-бар каждые 1000 трасс, чтобы не замедлять работу
-        if (i % 1000 == 0 || i == n_traces - 1) {
-            print_progress_bar("1/4 Reading headers", i + 1, n_traces);
-        }
-    }
-
-    // --- Шаг 2: Безопасная параллельная обработка данных в памяти ---
-    print_progress_bar("2/4 Processing in parallel", 0, 1); // Показываем начало этапа
+    // --- Основная карта для агрегации результатов ---
     using InMemoryMap = std::unordered_map<std::vector<int>, std::vector<int>, VectorHash>;
     InMemoryMap final_map;
-    std::vector<InMemoryMap> local_maps;
 
-    #pragma omp parallel
-    {
-        int thread_id = omp_get_thread_num();
-        #pragma omp single
+    int traces_processed = 0;
+    while (traces_processed < n_traces) {
+        // Определяем, сколько трасс читать на этой итерации
+        int traces_to_read = std::min(traces_per_chunk, n_traces - traces_processed);
+        size_t bytes_to_read = traces_to_read * trace_size;
+        
+        // 1. Читаем большой непрерывный блок с диска за один вызов
+        reader.read_raw_block(traces_processed, bytes_to_read, buffer.data());
+
+        // 2. Параллельно обрабатываем заголовки из этого блока УЖЕ В ПАМЯТИ
+        std::vector<InMemoryMap> local_maps;
+        #pragma omp parallel
         {
-            local_maps.resize(omp_get_num_threads());
+            int thread_id = omp_get_thread_num();
+            #pragma omp single
+            {
+                local_maps.resize(omp_get_num_threads());
+            }
+
+            #pragma omp for schedule(dynamic)
+            for (int i = 0; i < traces_to_read; ++i) {
+                // Получаем указатель на заголовок внутри нашего буфера в памяти
+                const char* header_ptr = buffer.data() + i * trace_size;
+                
+                std::vector<int> key_vals(n_keys);
+                for (size_t j = 0; j < n_keys; ++j) {
+                    key_vals[j] = get_trace_field_value(reinterpret_cast<const uint8_t*>(header_ptr), keys_[j]);
+                }
+                
+                int global_trace_index = traces_processed + i;
+                local_maps[thread_id][key_vals].push_back(global_trace_index);
+            }
+        } // Конец параллельной секции
+
+        // 3. Сливаем результаты из локальных карт в общую
+        for (const auto& local_map : local_maps) {
+            for (const auto& pair : local_map) {
+                final_map[pair.first].insert(final_map[pair.first].end(), pair.second.begin(), pair.second.end());
+            }
         }
 
-        #pragma omp for schedule(dynamic, 1000)
-        for (int i = 0; i < n_traces; ++i) {
-            local_maps[thread_id][all_keys_info[i].key_values].push_back(all_keys_info[i].trace_idx);
-        }
+        traces_processed += traces_to_read;
+        print_progress_bar("1/2 Reading & Processing", traces_processed, n_traces);
     }
-    print_progress_bar("2/4 Processing in parallel", 1, 1); // Показываем завершение этапа
-
-    // --- Шаг 3: Последовательное объединение локальных карт в одну общую ---
-    int merged_maps = 0;
-    int total_maps = local_maps.size();
-    for (auto& local_map : local_maps) {
-        for (auto& pair : local_map) {
-            final_map[pair.first].insert(
-                final_map[pair.first].end(),
-                std::make_move_iterator(pair.second.begin()),
-                std::make_move_iterator(pair.second.end())
-            );
-        }
-        print_progress_bar("3/4 Merging results", ++merged_maps, total_maps);
-    }
-    local_maps.clear();
-
-    // --- Шаг 4: Запись объединенной карты в SQLite в одной транзакции ---
+    
+    // --- Шаг 4: Запись объединенной карты в SQLite (без изменений) ---
     sqlite3_stmt* stmt;
     std::stringstream sql;
     sql << "INSERT OR REPLACE INTO trace_map (";
@@ -164,9 +165,8 @@ void TraceMap::build_map(const SegyReader& reader) {
         if (sqlite3_step(stmt) != SQLITE_DONE) {/* обработка ошибки */}
         sqlite3_reset(stmt);
         
-        // Обновляем прогресс-бар каждые 100 ключей
-        if (++written_keys % 100 == 0 || written_keys == total_keys) {
-            print_progress_bar("4/4 Writing to database", written_keys, total_keys);
+        if (++written_keys % 1000 == 0 || written_keys == total_keys) {
+            print_progress_bar("2/2 Writing to database", written_keys, total_keys);
         }
     }
     
