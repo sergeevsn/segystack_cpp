@@ -3,21 +3,29 @@
 #include <iostream>
 #include <string>
 
-// Эта функция теперь будет доступна всем, кто подключит "util.hpp"
 inline void print_progress_bar(const std::string& label, int current, int total, int width = 50) {
     if (total == 0) return;
-    float progress = static_cast<float>(current) / total;
-    int bar_width = static_cast<int>(progress * width);
 
-    std::cout << "\r" << label;
-    std::cout.width(30 - label.length()); // Выравнивание
-    std::cout << std::left << ": [";
+    // --- ИСПРАВЛЕНИЕ 1: Правильный расчет прогресса и ширины ---
+    // Используем double для большей точности и добавляем 0.5 для правильного математического округления
+    double progress = static_cast<double>(current) / total;
+    int bar_width = static_cast<int>(progress * width + 0.5);
+
+    // --- ИСПРАВЛЕНИЕ 2: Правильное форматирование вывода ---
+    std::cout << "\r" // Возврат каретки
+              << std::left << std::setw(30) << label // Устанавливаем фиксированную ширину метки и выравниваем по левому краю
+              << ": [";
+
     for (int i = 0; i < width; ++i) {
         std::cout << (i < bar_width ? '#' : '.');
     }
-    std::cout << "] " << static_cast<int>(progress * 100.0) << "%" << std::flush;
+    std::cout << "] " 
+              << std::right << std::setw(3) << static_cast<int>(progress * 100.0) << "%" // Фиксированная ширина для процентов
+              << " (" << current << "/" << total << ")"
+              << std::flush; // Принудительный сброс буфера в консоль
 
-    if (current == total) {
+    // --- ИСПРАВЛЕНИЕ 3: Перевод строки только ПОСЛЕ финального вывода ---
+    if (current >= total) {
         std::cout << std::endl;
     }
 }
