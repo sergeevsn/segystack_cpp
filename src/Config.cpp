@@ -30,5 +30,6 @@ Config load_config(const std::string& filename) {
     cfg.output_file = params["output_file"];
     cfg.velocity_file = params["velocity_file"];
     cfg.nmo_stretch_muting_percent = std::stod(params["nmo_stretch_muting_percent"]);
+    cfg.num_threads = std::stoi(params["num_threads"]);
     return cfg;
 } 

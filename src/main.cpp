@@ -128,6 +128,21 @@ int main(int argc, char** argv) {
         return 1;
     }
     Config cfg = load_config(argv[1]);
+
+    if (cfg.num_threads > 0) {
+        omp_set_num_threads(cfg.num_threads);
+        std::cout << "OpenMP: Using " << cfg.num_threads << " threads as specified in config." << std::endl;
+    } else {
+        std::cout << "OpenMP: Using default number of threads." << std::endl;
+    }
+    // Выведем фактическое количество потоков, которое будет использоваться
+    #pragma omp parallel
+    {
+        #pragma omp single
+        {
+            std::cout << "OpenMP: Parallel regions will run with " << omp_get_num_threads() << " threads." << std::endl;
+        }
+    }
    
     std::cout << "Input:    " << cfg.input_file << std::endl;
     std::cout << "Output:   " << cfg.output_file << std::endl;
