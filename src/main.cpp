@@ -13,6 +13,8 @@
 #include <omp.h>
 #include "sgylib/SegyUtil.hpp"
 #include <chrono>
+#include "util.hpp"
+#include <filesystem>
 
 // ------------------------ Типы ----------------------------
 using VelTable = std::map<int, std::vector<std::pair<float, float>>>;
@@ -118,71 +120,86 @@ std::vector<float> stack_traces(const std::vector<std::vector<float>>& traces) {
 }
 
 // ------------------------ main ----------------------------
+// ======================== ГЛАВНАЯ ЛОГИКА ============================
 int main(int argc, char** argv) {
     auto start_time = std::chrono::high_resolution_clock::now();
     if (argc < 2) {
-        std::cerr << "Error: Configuration file path not provided." << std::endl;
-        std::cerr << "Usage: " << argv[0] << " <file_path>" << std::endl;
-        return 1; // Return error code
+        std::cerr << "Error: Configuration file path not provided.\nUsage: " << argv[0] << " <path_to_config>\n";
+        return 1;
     }
     Config cfg = load_config(argv[1]);
    
-    std::cout << "Input: " << cfg.input_file << std::endl;
-    std::cout << "Output: " << cfg.output_file << std::endl;
+    std::cout << "Input:    " << cfg.input_file << std::endl;
+    std::cout << "Output:   " << cfg.output_file << std::endl;
     std::cout << "Velocity: " << cfg.velocity_file << std::endl;
-    std::cout << "NMO Stretch Muting Percent: " << cfg.nmo_stretch_muting_percent << std::endl;
-
-    // Проверка наличия входного файла
-    std::ifstream test_input(cfg.input_file);
-    if (!test_input) {
-        std::cerr << "Error: Cannot open input SEG-Y file: " << cfg.input_file << std::endl;
+    
+    // --- ИЗМЕНЕНИЕ: Упрощенная проверка файлов, т.к. конструкторы Segy* сами вызовут ошибку ---
+    if (!std::filesystem::exists(cfg.input_file)) {
+        std::cerr << "Error: Cannot find input SEG-Y file: " << cfg.input_file << std::endl;
         return 2;
     }
-    test_input.close();
-
-    // Проверка наличия файла скоростей
-    std::ifstream test_vel(cfg.velocity_file);
-    if (!test_vel) {
-        std::cerr << "Error: Cannot open velocity file: " << cfg.velocity_file << std::endl;
+    if (!std::filesystem::exists(cfg.velocity_file)) {
+        std::cerr << "Error: Cannot find velocity file: " << cfg.velocity_file << std::endl;
         return 3;
     }
-    test_vel.close();
+    
+    // --- ИЗМЕНЕНИЕ: Новый, явный подход к созданию/загрузке карты трасс ---
+    const std::string main_db_path = cfg.input_file + ".cdp_offset.sqlite";
+    const std::string main_map_name = "cdp_offset_map";
+    const std::vector<std::string> main_map_keys = {"CDP", "offset"};
 
-    // Проверка возможности создания выходного файла
-    std::ofstream test_out(cfg.output_file, std::ios::binary | std::ios::trunc);
-    if (!test_out) {
-        std::cerr << "Error: Cannot create output SEG-Y file: " << cfg.output_file << std::endl;
-        return 4;
+    if (!std::filesystem::exists(main_db_path)) {
+        std::cout << "\nTrace map for input file not found. Building new one..." << std::endl;
+        SegyReader temp_reader(cfg.input_file);
+        temp_reader.build_tracemap(main_map_name, main_db_path, main_map_keys);
+    } else {
+        std::cout << "\nFound existing trace map for input file." << std::endl;
     }
-    test_out.close();
 
-
-    TraceMap cdp_offset_map("cdp_offset", {"CDP", "offset"});   
-    SegyReader input_reader(cfg.input_file, cdp_offset_map, {"offset", "CDP"});
-
+    // --- Основная часть программы ---
+    // Создаем ридер и ЗАГРУЖАЕМ в него уже готовую карту
+    SegyReader input_reader(cfg.input_file);
+    input_reader.load_tracemap(main_map_name, main_db_path, main_map_keys);
+    
     int num_samples = input_reader.num_samples();
     float dt = input_reader.sample_interval() * 1e-6f;
 
-    auto cdp_values = input_reader.tracemap("cdp_offset").get_unique_values("CDP");
+    // Получаем уникальные CDP, используя новый API
+    auto tmap = input_reader.get_tracemap(main_map_name);
+    auto cdp_values = tmap->get_unique_values("CDP");
     int num_cdps = cdp_values.size();
+    
+    std::cout << "Found " << num_cdps << " unique CDPs to process." << std::endl;
 
+    // --- Считывание и интерполяция скоростей ---
     std::map<int, std::vector<float>> cdp_velocities;
 
     if (cfg.velocity_file.ends_with(".sgy") || cfg.velocity_file.ends_with(".segy")) {
-        TraceMap cdp_map("cdp", {"CDP"});  
+        std::cout << "Reading velocities from SEG-Y file..." << std::endl;
         
-        std::cout << "Reading velocity SEG-Y file " << cfg.velocity_file << "..." << std::endl;
-        SegyReader vel_reader(cfg.velocity_file, cdp_map);
+        // ИЗМЕНЕНИЕ: Тот же "умный" подход для файла скоростей
+        const std::string vel_db_path = cfg.velocity_file + ".cdp.sqlite";
+        const std::string vel_map_name = "cdp_map";
+        const std::vector<std::string> vel_map_keys = {"CDP"};
+
+        if (!std::filesystem::exists(vel_db_path)) {
+            std::cout << "Trace map for velocity file not found. Building new one..." << std::endl;
+            SegyReader temp_vel_reader(cfg.velocity_file);
+            temp_vel_reader.build_tracemap(vel_map_name, vel_db_path, vel_map_keys);
+        }
+        
+        // Создаем ридер для файла скоростей и загружаем его карту
+        SegyReader vel_reader(cfg.velocity_file);
+        vel_reader.load_tracemap(vel_map_name, vel_db_path, vel_map_keys);
 
         for (int cdp : cdp_values) {
-            auto g = vel_reader.get_gather("cdp", {cdp});
+            auto g = vel_reader.get_gather(vel_map_name, {cdp});
             if (!g.empty()) {
-                std::vector<float> v(g[0].begin(), g[0].end());
-                cdp_velocities[cdp] = std::move(v);
+                cdp_velocities[cdp] = g[0];
             }
         }
-
-        // Интерполяция/экстраполяция отсутствующих CDP
+        
+        // Интерполяция/экстраполяция (без изменений)
         VelTable table;
         for (const auto& [cdp, vec] : cdp_velocities) {
             table[cdp].clear();
@@ -192,43 +209,46 @@ int main(int argc, char** argv) {
         cdp_velocities = interpolate_velocity_cube(table, cdp_values, num_samples, dt);
 
     } else {
-        std::cout << "Reading velocity table file " << cfg.velocity_file << "..." <<std::endl;
+        std::cout << "Reading velocities from table file..." <<std::endl;
         VelTable table = read_velocity_table(cfg.velocity_file);
         std::cout << "Interpolating velocity..." << std::endl;
         cdp_velocities = interpolate_velocity_cube(table, cdp_values, num_samples, dt);
     }
 
+    // --- Основной цикл обработки и записи ---
     SegyWriter writer(cfg.output_file, input_reader);
-
-    std::cout << "Processing (NMO + stacking) " << num_cdps << " CDPs..." << std::endl;
+    std::cout << "\nStarting NMO correction and stacking..." << std::endl;
 
     int processed = 0;
     for (int cdp : cdp_values) {
-        ++processed;
-        if ((processed % 50 == 0) || (processed == num_cdps)) {
-            print_progress_bar(processed, num_cdps);
-        }
+        print_progress_bar("Processing CDPs", ++processed, num_cdps);
 
         std::vector<std::vector<uint8_t>> headers;
         std::vector<std::vector<float>> traces;
-        input_reader.get_gather_and_headers("cdp_offset", {cdp, std::nullopt}, headers, traces);
+        // ИЗМЕНЕНИЕ: get_gather_and_headers теперь не требует TraceMap в качестве аргумента
+        input_reader.get_gather_and_headers(main_map_name, {cdp, std::nullopt}, headers, traces);
 
-        if (traces.empty() || !cdp_velocities.count(cdp)) continue;
+        if (traces.empty() || cdp_velocities.find(cdp) == cdp_velocities.end()) {
+            continue;
+        }
 
         std::vector<float> offsets;
-        for (const auto& h : headers)
+        offsets.reserve(headers.size());
+        for (const auto& h : headers) {
             offsets.push_back(static_cast<float>(input_reader.get_header_value_i32(h, "offset")));
+        }
 
-        auto corrected = nmo_correction(traces, offsets, cdp_velocities[cdp], dt, cfg.nmo_stretch_muting_percent);
+        auto corrected = nmo_correction(traces, offsets, cdp_velocities.at(cdp), dt, cfg.nmo_stretch_muting_percent);
         auto stacked = stack_traces(corrected);
 
+        // Используем заголовок первой трассы сейсмосбора как шаблон для суммарной трассы
         writer.write_trace(headers.front(), stacked);
     }
 
-    std::cout << "\nStacked output written to: " << cfg.output_file << "\n";
     auto end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end_time - start_time;
-    std::cout << "Total processing time: " << elapsed.count() << " seconds.\n";
+    std::cout << "\nNMO+Stacking finished. Output written to: " << cfg.output_file << "\n";
+    std::cout << "Total processing time: " << std::fixed << std::setprecision(2) << elapsed.count() << " seconds.\n";
+    
     return 0;
 }
-

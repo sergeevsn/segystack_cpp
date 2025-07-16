@@ -1,4 +1,5 @@
 #pragma once
+
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -7,22 +8,32 @@
 
 class SegyWriter {
 public:
-    // Construct from SegyReader (copies headers and metadata)
-    SegyWriter(const std::string& filename, const SegyReader& reader);
-    // Construct from explicit metadata
+    // Конструктор, создающий Writer на основе существующего Reader.
+    explicit SegyWriter(const std::string& filename, const SegyReader& reader);
+    
+    // Конструктор, создающий Writer с явно заданными параметрами.
     SegyWriter(const std::string& filename,
                const std::vector<char>& text_header,
                const std::vector<uint8_t>& bin_header,
                int num_samples,
                float sample_interval);
+    
     ~SegyWriter();
 
-    // Write a single trace (header + samples)
-    void write_trace(const std::vector<uint8_t>& header, const std::vector<float>& samples);
-    // Write a gather (multiple headers + traces)
-    void write_gather(const std::vector<std::vector<uint8_t>>& headers, const std::vector<std::vector<float>>& traces);
+    // Запрещаем копирование, т.к. класс управляет файлом.
+    SegyWriter(const SegyWriter&) = delete;
+    SegyWriter& operator=(const SegyWriter&) = delete;
 
-    // Get current number of traces written
+    // Записывает одну трассу (заголовок + отсчеты).
+    void write_trace(const std::vector<uint8_t>& header, const std::vector<float>& samples);
+
+    // Записывает целый сейсмосбор (несколько заголовков и трасс).
+    void write_gather(const std::vector<std::vector<uint8_t>>& headers, const std::vector<std::vector<float>>& traces);
+    
+    // Псевдоним для обратной совместимости, если нужен.
+    void write_gather_block(const std::vector<std::vector<uint8_t>>& headers, const std::vector<std::vector<float>>& traces);
+
+    // Текущее количество записанных трасс.
     int num_traces() const { return num_traces_; }
 
 private:
@@ -34,9 +45,16 @@ private:
     int num_samples_ = 0;
     float sample_interval_ = 0.0f;
     int trace_bsize_ = 0;
-    void update_bin_header_num_traces();
-    void write_headers();
-    void open_file();
-    void close_file();
-    void write_trace_internal(const std::vector<uint8_t>& header, const std::vector<float>& samples);
-}; 
+
+    // --- ИСПРАВЛЕНИЕ: ДОБАВЛЕНЫ ОБЪЯВЛЕНИЯ ПРИВАТНЫХ МЕТОДОВ ---
+    
+    /**
+     * @brief Инициализирует и открывает файл, записывает начальные заголовки.
+     */
+    void init();
+    
+    /**
+     * @brief Обновляет бинарный заголовок и корректно закрывает файл.
+     */
+    void finalize_file();
+};
