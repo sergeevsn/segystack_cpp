@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <string>
+#include <iomanip>
 
 inline void print_progress_bar(const std::string& label, int current, int total, int width = 50) {
     if (total == 0) return;
